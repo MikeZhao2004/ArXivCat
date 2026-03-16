@@ -2,3 +2,6 @@ downloads/
 outputs/
 __pycache__/
 *.pyc
+build/
+dist/
+*.spec

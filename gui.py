@@ -4,7 +4,17 @@ import threading
 import subprocess
 import sys
 import io
+import ctypes
 from pathlib import Path
+
+# Fix blurry rendering on high-DPI screens (Windows)
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)
+except Exception:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
 
 sys.path.insert(0, str(Path(__file__).parent))
 from arxivcat import extract_arxiv_id, download_source, extract_body_from_dir
@@ -35,8 +45,14 @@ class ArxivCatGUI:
         top = tk.Frame(self.root, bg=BG, padx=20, pady=14)
         top.pack(fill="x")
 
-        tk.Label(top, text="ArxivCat", bg=BG, fg=ACCENT,
-                 font=("Consolas", 17, "bold")).pack(anchor="w")
+        title_row = tk.Frame(top, bg=BG)
+        title_row.pack(anchor="w")
+        tk.Label(title_row, text="ArxivCat", bg=BG, fg=ACCENT,
+                 font=("Consolas", 17, "bold")).pack(side="left")
+        tk.Label(title_row, text=" by MikeDuke", bg=BG, fg=MUTED,
+                 font=("Consolas", 9)).pack(side="left", padx=(4, 0), pady=(6, 0))
+        tk.Label(title_row, text=" v0.1.0", bg=BG, fg=MUTED,
+                 font=("Consolas", 9)).pack(side="left", pady=(6, 0))
         tk.Label(top, text="paste an arXiv URL or ID", bg=BG, fg=MUTED,
                  font=("Consolas", 9)).pack(anchor="w")
 
@@ -53,6 +69,7 @@ class ArxivCatGUI:
         )
         self.entry.pack(side="left", fill="x", expand=True, ipady=6)
         self.entry.bind("<Return>", lambda e: self._run())
+        self.entry.bind("<Control-z>", lambda e: self._undo_entry(e))
 
         self.run_btn = tk.Button(
             row, text="  Run  ",
@@ -139,12 +156,14 @@ class ArxivCatGUI:
         )
         self.open_btn.pack(side="left", padx=(8, 0), ipady=5, ipadx=10)
 
-        # 字数统计（右下角）
-        self.word_count_label = tk.Label(
-            bottom, text="", bg=BG, fg=MUTED,
-            font=("Consolas", 9), anchor="e"
+        self.strip_comments_btn = tk.Button(
+            bottom, text="Strip Comments",
+            bg=BTN, fg=TEXT, activebackground="#45475a",
+            font=("Consolas", 10), relief="flat",
+            cursor="hand2", state="disabled",
+            command=self._strip_comments
         )
-        self.word_count_label.pack(side="right")
+        self.strip_comments_btn.pack(side="left", padx=(8, 0), ipady=5, ipadx=10)
 
         self.status = tk.Label(bottom, text="", bg=BG, fg=MUTED,
                                font=("Consolas", 9))
@@ -167,16 +186,22 @@ class ArxivCatGUI:
         self.log.tag_config("info", foreground=TEXT)
 
         self.preview_label_var = tk.StringVar(value="body.tex")
-        self.preview_label = tk.Label(mid, textvariable=self.preview_label_var,
+        self.preview_header = tk.Frame(mid, bg=BG)
+        self.preview_header.pack(fill="x", anchor="w")
+        self.preview_label = tk.Label(self.preview_header, textvariable=self.preview_label_var,
                                       bg=BG, fg=MUTED, font=("Consolas", 8))
-        self.preview_label.pack(anchor="w")
+        self.preview_label.pack(side="left")
+        self.word_count_label = tk.Label(self.preview_header, text="", bg=BG, fg=MUTED,
+                                         font=("Consolas", 8), anchor="e")
+        self.word_count_label.pack(side="right")
 
         # 预览区（可编辑）
         self.preview = scrolledtext.ScrolledText(
             mid, bg=PANEL, fg=TEXT,
             font=("Consolas", 10), relief="flat",
             wrap="word", highlightthickness=0,
-            insertbackground=ACCENT
+            insertbackground=ACCENT,
+            undo=True, maxundo=-1
         )
         self.preview.pack(fill="both", expand=True, pady=(2, 0))
         self.preview.bind("<KeyRelease>", lambda e: self._update_word_count())
@@ -185,8 +210,8 @@ class ArxivCatGUI:
 
     def _toggle_log(self):
         if self.show_log_var.get():
-            self.log_label.pack(anchor="w", before=self.preview_label)
-            self.log.pack(fill="x", pady=(2, 10), before=self.preview_label)
+            self.log_label.pack(anchor="w", before=self.preview_header)
+            self.log.pack(fill="x", pady=(2, 10), before=self.preview_header)
         else:
             self.log_label.pack_forget()
             self.log.pack_forget()
@@ -218,6 +243,7 @@ class ArxivCatGUI:
         else:
             content = "(文件不存在)"
         self.preview.insert("end", content)
+        self.preview.edit_reset()  # 清空 undo 栈，避免撤销到加载前
         self._update_word_count()
 
     def _update_word_count(self):
@@ -312,6 +338,7 @@ class ArxivCatGUI:
             self.copy_btn.configure(state="normal", text=f"Copy {view}.tex")
             self.overwrite_btn.configure(state="normal")
             self.open_btn.configure(state="normal")
+            self.strip_comments_btn.configure(state="normal")
 
     def _copy_current(self):
         content = self.preview.get("1.0", "end-1c")
@@ -334,6 +361,26 @@ class ArxivCatGUI:
     def _open_folder(self):
         if self.output_dir and self.output_dir.exists():
             subprocess.Popen(f'explorer "{self.output_dir}"')
+
+    def _strip_comments(self):
+        import re
+        content = self.preview.get("1.0", "end-1c")
+        stripped = re.sub(r'(?<!\\)%.*', '', content)
+        stripped = re.sub(r'\n{3,}', '\n\n', stripped)
+        self.preview.edit_separator()  # 让 strip 作为一个独立 undo 单元
+        self.preview.delete("1.0", "end")
+        self.preview.insert("end", stripped.strip())
+        self.preview.edit_separator()
+        self._update_word_count()
+        self.status.configure(text="Comments stripped")
+        self.root.after(2000, lambda: self.status.configure(text=""))
+
+    def _undo_entry(self, event):
+        try:
+            self.entry.delete(0, "end")
+        except Exception:
+            pass
+        return "break"
 
 
 if __name__ == "__main__":
