@@ -25,6 +25,8 @@ python arxivcat.py --url https://arxiv.org/abs/2511.16655
 python gui.py
 ```
 
+Requires the `flet` environment: `conda activate flet`
+
 ## Output
 
 ```
@@ -42,7 +44,7 @@ outputs/
 Python 3.8+
 
 ```bash
-pip install requests
+pip install requests flet
 ```
 
 ## Notes

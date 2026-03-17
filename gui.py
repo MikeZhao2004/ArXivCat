@@ -1,389 +1,462 @@
-import tkinter as tk
-from tkinter import scrolledtext, ttk
+import flet as ft
 import threading
-import subprocess
 import sys
 import io
-import ctypes
+import re
+import shutil
+import subprocess
 from pathlib import Path
-
-# Fix blurry rendering on high-DPI screens (Windows)
-try:
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)
-except Exception:
-    try:
-        ctypes.windll.user32.SetProcessDPIAware()
-    except Exception:
-        pass
 
 sys.path.insert(0, str(Path(__file__).parent))
 from arxivcat import extract_arxiv_id, download_source, extract_body_from_dir
 
-
-BG      = "#1e1e2e"
-PANEL   = "#2a2a3e"
-ACCENT  = "#89b4fa"
-TEXT    = "#cdd6f4"
-MUTED   = "#6c7086"
-SUCCESS = "#a6e3a1"
-ERROR   = "#f38ba8"
-BTN     = "#313244"
+VERSION = "v0.2.0"
+AUTHOR  = "by MikeDuke"
 
 
-class ArxivCatGUI:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("ArxivCat")
-        self.root.geometry("760x620")
-        self.root.resizable(True, True)
-        self.root.configure(bg=BG)
-        self.output_dir = None
-        self._build_ui()
+def main(page: ft.Page):
+    page.title = "ArxivCat"
+    page.window.width  = 780
+    page.window.height = 660
+    page.window.min_width  = 560
+    page.window.min_height = 480
+    page.bgcolor = "#1e1e2e"
+    page.padding = 0
+    page.fonts = {"Consolas": "Consolas"}
+    page.theme = ft.Theme(font_family="Consolas")
 
-    def _build_ui(self):
-        # ── 顶部：标题 + 输入 ──────────────────────────────────
-        top = tk.Frame(self.root, bg=BG, padx=20, pady=14)
-        top.pack(fill="x")
+    # ── 启动时清理 downloads/ 缓存（超过 50MB 则清空）─────────
+    import os
+    _base = Path(os.environ.get("APPDATA", Path.home())) / "ArxivCat"
+    _downloads = _base / "downloads"
+    if _downloads.exists():
+        _size = sum(f.stat().st_size for f in _downloads.rglob("*") if f.is_file())
+        if _size > 50 * 1024 * 1024:
+            shutil.rmtree(_downloads)
+            _downloads.mkdir(parents=True, exist_ok=True)
 
-        title_row = tk.Frame(top, bg=BG)
-        title_row.pack(anchor="w")
-        tk.Label(title_row, text="ArxivCat", bg=BG, fg=ACCENT,
-                 font=("Consolas", 17, "bold")).pack(side="left")
-        tk.Label(title_row, text=" by MikeDuke", bg=BG, fg=MUTED,
-                 font=("Consolas", 9)).pack(side="left", padx=(4, 0), pady=(6, 0))
-        tk.Label(title_row, text=" v0.1.0", bg=BG, fg=MUTED,
-                 font=("Consolas", 9)).pack(side="left", pady=(6, 0))
-        tk.Label(top, text="paste an arXiv URL or ID", bg=BG, fg=MUTED,
-                 font=("Consolas", 9)).pack(anchor="w")
+    # ── 状态 ──────────────────────────────────────────────────
+    output_dir: Path | None = None
+    body_content    = ""
+    appendix_content = ""
+    clipboard = ft.Clipboard()
+    page.services.append(clipboard)
+    page.update()
 
-        row = tk.Frame(top, bg=BG, pady=8)
-        row.pack(fill="x")
+    # ── 颜色 ──────────────────────────────────────────────────
+    BG      = "#1e1e2e"
+    PANEL   = "#2a2a3e"
+    ACCENT  = "#89b4fa"
+    TEXT    = "#cdd6f4"
+    MUTED   = "#6c7086"
+    SUCCESS = "#a6e3a1"
+    ERROR   = "#f38ba8"
+    BTN     = "#313244"
 
-        self.url_var = tk.StringVar()
-        self.entry = tk.Entry(
-            row, textvariable=self.url_var,
-            bg=PANEL, fg=TEXT, insertbackground=ACCENT,
-            relief="flat", font=("Consolas", 11),
-            highlightthickness=1, highlightbackground=MUTED,
-            highlightcolor=ACCENT
+    # ── 控件 ──────────────────────────────────────────────────
+    url_field = ft.TextField(
+        hint_text="paste an arXiv URL or ID",
+        hint_style=ft.TextStyle(color=MUTED),
+        bgcolor=PANEL,
+        color=TEXT,
+        cursor_color=ACCENT,
+        border_color=MUTED,
+        focused_border_color=ACCENT,
+        border_radius=6,
+        text_style=ft.TextStyle(font_family="Consolas", size=12),
+        expand=True,
+        height=42,
+        content_padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+    )
+
+    mini_status = ft.Text("", color=MUTED, size=12, font_family="Consolas")
+
+    log_view = ft.ListView(
+        expand=False,
+        height=220,
+        spacing=0,
+        auto_scroll=True,
+    )
+    log_container = ft.Container(
+        content=log_view,
+        bgcolor=PANEL,
+        border_radius=6,
+        padding=8,
+    )
+    log_label = ft.Text("log", color=MUTED, size=11, font_family="Consolas")
+    log_section = ft.Column(
+        controls=[
+            log_label,
+            ft.Container(height=2),
+            log_container,
+        ],
+        spacing=0,
+        visible=False,
+    )
+
+    preview_field = ft.TextField(
+        value="",
+        multiline=True,
+        expand=True,
+        bgcolor="transparent",
+        color=TEXT,
+        cursor_color=ACCENT,
+        border_color="transparent",
+        focused_border_color="transparent",
+        border_radius=6,
+        text_style=ft.TextStyle(font_family="Consolas", size=11),
+        min_lines=10,
+        shift_enter=True,
+    )
+
+    view_label   = ft.Text("body.tex",  color=MUTED, size=11, font_family="Consolas")
+    word_count   = ft.Text("", color=MUTED, size=11, font_family="Consolas")
+    status_text  = ft.Text("", color=MUTED, size=11, font_family="Consolas")
+
+    run_txt = ft.Text("Run", font_family="Consolas", weight=ft.FontWeight.BOLD, size=11, color="#1e1e2e")
+    run_btn = ft.Container(
+        content=run_txt,
+        bgcolor=ACCENT,
+        border_radius=6,
+        padding=ft.Padding.symmetric(horizontal=20, vertical=10),
+        height=42,
+        ink=True,
+    )
+    run_btn._disabled = False
+
+    def _run_hover(e):
+        if not run_btn._disabled:
+            run_btn.bgcolor = "#74c7ec" if e.data == "true" else ACCENT
+            run_btn.update()
+
+    run_btn.on_hover = _run_hover
+    # run_btn.on_click already bound at construction
+
+    view_dd = ft.Dropdown(
+        value="body",
+        options=[ft.dropdown.Option("body"), ft.dropdown.Option("appendix")],
+        bgcolor=PANEL,
+        color=TEXT,
+        border_color=MUTED,
+        focused_border_color=ACCENT,
+        border_radius=6,
+        text_style=ft.TextStyle(font_family="Consolas", size=11),
+        width=120,
+        height=40,
+        content_padding=ft.Padding.symmetric(horizontal=10, vertical=4),
+    )
+
+    show_log_chk = ft.Checkbox(
+        label="show log",
+        value=False,
+        active_color=ACCENT,
+        label_style=ft.TextStyle(color=MUTED, size=12, font_family="Consolas"),
+        on_change=lambda e: on_show_log(e),
+    )
+
+    def make_btn(label, on_click, disabled=True):
+        txt = ft.Text(label, font_family="Consolas", size=10, color=TEXT)
+        c = ft.Container(
+            content=ft.Row(
+                controls=[txt],
+                tight=True,
+            ),
+            bgcolor=BTN,
+            border_radius=6,
+            padding=ft.Padding.symmetric(horizontal=14, vertical=8),
+            on_click=None,
+            expand=False,
+            ink=True,
         )
-        self.entry.pack(side="left", fill="x", expand=True, ipady=6)
-        self.entry.bind("<Return>", lambda e: self._run())
-        self.entry.bind("<Control-z>", lambda e: self._undo_entry(e))
+        c._label = label
+        c._txt = txt
+        c._disabled = disabled
+        c._on_click = on_click
 
-        self.run_btn = tk.Button(
-            row, text="  Run  ",
-            bg=ACCENT, fg="#1e1e2e", activebackground="#74c7ec",
-            font=("Consolas", 10, "bold"), relief="flat",
-            cursor="hand2", command=self._run
-        )
-        self.run_btn.pack(side="left", padx=(8, 0), ipady=6, ipadx=4)
+        def _hover(e):
+            if not c._disabled:
+                c.bgcolor = "#45475a" if e.data == "true" else BTN
+                c.update()
 
-        # ── 控制栏：下拉 + log开关 + 状态提示 ──────────────────
-        ctrl = tk.Frame(self.root, bg=BG, padx=20, pady=4)
-        ctrl.pack(fill="x")
+        def _click(e):
+            if not c._disabled:
+                c._on_click(e)
 
-        # combobox 样式
-        style = ttk.Style()
-        style.theme_use("clam")
-        style.configure("Dark.TCombobox",
-                        fieldbackground=PANEL, background=BTN,
-                        foreground=TEXT, selectbackground=BTN,
-                        selectforeground=TEXT, arrowcolor=MUTED,
-                        bordercolor=MUTED, lightcolor=PANEL, darkcolor=PANEL)
-        style.map("Dark.TCombobox",
-                  fieldbackground=[("readonly", PANEL)],
-                  foreground=[("readonly", TEXT)])
+        c.on_hover = _hover
+        c.on_click = _click
+        if disabled:
+            txt.color = MUTED
+        return c
 
-        self.view_var = tk.StringVar(value="body")
-        self.view_combo = ttk.Combobox(
-            ctrl, textvariable=self.view_var,
-            values=["body", "appendix"],
-            state="readonly", width=10,
-            style="Dark.TCombobox",
-            font=("Consolas", 10)
-        )
-        self.view_combo.pack(side="left", ipady=3)
-        self.view_combo.bind("<<ComboboxSelected>>", lambda e: self._on_view_change())
+    def set_btn_disabled(btn, disabled):
+        btn._disabled = disabled
+        btn._txt.color = MUTED if disabled else TEXT
+        btn.update()
 
-        # log 开关
-        self.show_log_var = tk.BooleanVar(value=False)
-        self.log_chk = tk.Checkbutton(
-            ctrl, text="show log",
-            variable=self.show_log_var,
-            bg=BG, fg=MUTED, selectcolor=PANEL,
-            activebackground=BG, activeforeground=TEXT,
-            font=("Consolas", 9), cursor="hand2",
-            command=self._toggle_log
-        )
-        self.log_chk.pack(side="left", padx=(10, 0))
+    copy_btn           = make_btn("Copy",            lambda e: on_copy(e))
+    overwrite_btn      = make_btn("Overwrite",          lambda e: on_overwrite(e))
+    open_btn           = make_btn("Open Folder",        lambda e: on_open_folder(e))
+    strip_comments_btn = make_btn("Strip Comments",     lambda e: on_strip_comments(e))
 
-        # 右侧状态提示（隐藏log时显示进度）
-        self.mini_status = tk.Label(
-            ctrl, text="", bg=BG, fg=MUTED,
-            font=("Consolas", 9), anchor="e"
-        )
-        self.mini_status.pack(side="right", fill="x", expand=True, padx=(20, 0))
+    # ── 헬퍼 ──────────────────────────────────────────────────
 
-        # ── 底部：按钮（先pack，始终可见）────────────────────────
-        bottom = tk.Frame(self.root, bg=BG, padx=20, pady=10)
-        bottom.pack(fill="x", side="bottom")
+    def set_buttons_enabled(enabled: bool):
+        for btn in [copy_btn, overwrite_btn, open_btn, strip_comments_btn]:
+            set_btn_disabled(btn, not enabled)
+        page.update()
 
-        self.copy_btn = tk.Button(
-            bottom, text="Copy body.tex",
-            bg=BTN, fg=TEXT, activebackground="#45475a",
-            font=("Consolas", 10), relief="flat",
-            cursor="hand2", state="disabled",
-            command=self._copy_current
-        )
-        self.copy_btn.pack(side="left", ipady=5, ipadx=10)
-
-        self.overwrite_btn = tk.Button(
-            bottom, text="Overwrite",
-            bg=BTN, fg=TEXT, activebackground="#45475a",
-            font=("Consolas", 10), relief="flat",
-            cursor="hand2", state="disabled",
-            command=self._overwrite_file
-        )
-        self.overwrite_btn.pack(side="left", padx=(8, 0), ipady=5, ipadx=10)
-
-        self.open_btn = tk.Button(
-            bottom, text="Open Folder",
-            bg=BTN, fg=TEXT, activebackground="#45475a",
-            font=("Consolas", 10), relief="flat",
-            cursor="hand2", state="disabled",
-            command=self._open_folder
-        )
-        self.open_btn.pack(side="left", padx=(8, 0), ipady=5, ipadx=10)
-
-        self.strip_comments_btn = tk.Button(
-            bottom, text="Strip Comments",
-            bg=BTN, fg=TEXT, activebackground="#45475a",
-            font=("Consolas", 10), relief="flat",
-            cursor="hand2", state="disabled",
-            command=self._strip_comments
-        )
-        self.strip_comments_btn.pack(side="left", padx=(8, 0), ipady=5, ipadx=10)
-
-        self.status = tk.Label(bottom, text="", bg=BG, fg=MUTED,
-                               font=("Consolas", 9))
-        self.status.pack(side="right", padx=(0, 12))
-
-        # ── 中部：log（默认隐藏）+ 预览（可伸缩）────────────────
-        mid = tk.Frame(self.root, bg=BG, padx=20)
-        mid.pack(fill="both", expand=True)
-
-        self.log_label = tk.Label(mid, text="log", bg=BG, fg=MUTED,
-                                  font=("Consolas", 8))
-        self.log = scrolledtext.ScrolledText(
-            mid, bg=PANEL, fg=TEXT,
-            font=("Consolas", 9), relief="flat",
-            state="disabled", wrap="word",
-            highlightthickness=0, height=7
-        )
-        self.log.tag_config("ok",   foreground=SUCCESS)
-        self.log.tag_config("err",  foreground=ERROR)
-        self.log.tag_config("info", foreground=TEXT)
-
-        self.preview_label_var = tk.StringVar(value="body.tex")
-        self.preview_header = tk.Frame(mid, bg=BG)
-        self.preview_header.pack(fill="x", anchor="w")
-        self.preview_label = tk.Label(self.preview_header, textvariable=self.preview_label_var,
-                                      bg=BG, fg=MUTED, font=("Consolas", 8))
-        self.preview_label.pack(side="left")
-        self.word_count_label = tk.Label(self.preview_header, text="", bg=BG, fg=MUTED,
-                                         font=("Consolas", 8), anchor="e")
-        self.word_count_label.pack(side="right")
-
-        # 预览区（可编辑）
-        self.preview = scrolledtext.ScrolledText(
-            mid, bg=PANEL, fg=TEXT,
-            font=("Consolas", 10), relief="flat",
-            wrap="word", highlightthickness=0,
-            insertbackground=ACCENT,
-            undo=True, maxundo=-1
-        )
-        self.preview.pack(fill="both", expand=True, pady=(2, 0))
-        self.preview.bind("<KeyRelease>", lambda e: self._update_word_count())
-
-    # ── 事件处理 ───────────────────────────────────────────────
-
-    def _toggle_log(self):
-        if self.show_log_var.get():
-            self.log_label.pack(anchor="w", before=self.preview_header)
-            self.log.pack(fill="x", pady=(2, 10), before=self.preview_header)
-        else:
-            self.log_label.pack_forget()
-            self.log.pack_forget()
-
-    def _set_mini_status(self, msg, color=None):
-        self.mini_status.configure(text=msg, fg=color or MUTED)
-
-    def _on_view_change(self):
-        view = self.view_var.get()
-        self.preview_label_var.set(f"{view}.tex")
-        self.copy_btn.configure(text=f"Copy {view}.tex")
-        if self.output_dir:
-            path = self.output_dir / f"{view}.tex"
-            self._show_preview(path)
-
-    def _log(self, msg, tag="info"):
-        self.log.configure(state="normal")
-        self.log.insert("end", msg + "\n", tag)
-        self.log.see("end")
-        self.log.configure(state="disabled")
-
-    def _show_preview(self, path):
-        self.preview.delete("1.0", "end")
-        if path and path.exists():
-            try:
-                content = path.read_text(encoding="utf-8")
-            except Exception:
-                content = "(无法读取文件)"
-        else:
-            content = "(文件不存在)"
-        self.preview.insert("end", content)
-        self.preview.edit_reset()  # 清空 undo 栈，避免撤销到加载前
-        self._update_word_count()
-
-    def _update_word_count(self):
-        content = self.preview.get("1.0", "end-1c")
-        chars = len(content)
+    def update_word_count():
+        content = preview_field.value or ""
         words = len(content.split())
-        self.word_count_label.configure(text=f"{words} words  {chars} chars")
+        chars = len(content)
+        word_count.value = f"{words} words  {chars} chars"
+        page.update()
 
-    def _run(self):
-        url = self.url_var.get().strip()
+    def add_log(msg: str):
+        if msg.startswith("[OK]"):
+                color = SUCCESS
+        elif msg.startswith("[ERROR]"):
+                color = ERROR
+        else:
+                color = TEXT
+        log_view.controls.append(
+            ft.Text(msg, color=color, size=11, font_family="Consolas", selectable=True)
+        )
+        page.update()
+
+    def set_mini(msg, color=MUTED):
+        mini_status.value = msg
+        mini_status.color = color
+        page.update()
+
+    def show_status(msg, duration=2000):
+        status_text.value = msg
+        page.update()
+        def clear():
+            import time; time.sleep(duration / 1000)
+            status_text.value = ""
+            page.update()
+        threading.Thread(target=clear, daemon=True).start()
+
+    def load_preview():
+        nonlocal output_dir
+        if not output_dir:
+            return
+        view = view_dd.value
+        path = output_dir / f"{view}.tex"
+        if path.exists():
+            preview_field.value = path.read_text(encoding="utf-8")
+        else:
+            preview_field.value = "(file not found)"
+        view_label.value = f"{view}.tex"
+        update_word_count()
+        page.update()
+
+    # ── 事件 ──────────────────────────────────────────────────
+
+    def on_view_change(e):
+        load_preview()
+
+    def on_show_log(e):
+        log_section.visible = show_log_chk.value
+        page.update()
+
+    def on_copy(e):
+        async def _copy():
+            await clipboard.set(preview_field.value or "")
+        page.run_task(_copy)
+        show_status(f"Copied {view_dd.value}.tex!")
+
+    def on_overwrite(e):
+        nonlocal output_dir
+        if not output_dir:
+            return
+        view = view_dd.value
+        path = output_dir / f"{view}.tex"
+        path.write_text(preview_field.value or "", encoding="utf-8")
+        show_status(f"Saved {view}.tex")
+
+    def on_open_folder(e):
+        if output_dir and output_dir.exists():
+            subprocess.Popen(f'explorer "{output_dir}"')
+
+    def on_strip_comments(e):
+        content = preview_field.value or ""
+        stripped = re.sub(r'(?<!\\)%.*', '', content)
+        stripped = re.sub(r'\n{3}', '\n\n', stripped).strip()
+        preview_field.value = stripped
+        update_word_count()
+        show_status("Comments stripped")
+
+    def on_run(e):
+        nonlocal output_dir
+        url = url_field.value.strip() if url_field.value else ""
         if not url:
             return
-        self.run_btn.configure(state="disabled")
-        self.copy_btn.configure(state="disabled")
-        self.overwrite_btn.configure(state="disabled")
-        self.open_btn.configure(state="disabled")
-        self.output_dir = None
-        self.log.configure(state="normal")
-        self.log.delete("1.0", "end")
-        self.log.configure(state="disabled")
-        self.preview.delete("1.0", "end")
-        self.word_count_label.configure(text="")
-        threading.Thread(target=self._process, args=(url,), daemon=True).start()
+        run_btn._disabled = True
+        run_btn.bgcolor = MUTED
+        run_btn.update()
+        set_buttons_enabled(False)
+        output_dir = None
+        log_view.controls.clear()
+        preview_field.value = ""
+        word_count.value = ""
+        mini_status.value = ""
+        page.update()
+        threading.Thread(target=process, args=(url,), daemon=True).start()
 
-    def _process(self, url):
-        base = Path(__file__).parent
+    def process(url: str):
+        nonlocal output_dir
+        import os
+        base = Path(os.environ.get("APPDATA", Path.home())) / "ArxivCat"
         downloads_dir = base / "downloads"
         outputs_dir   = base / "outputs"
-        downloads_dir.mkdir(exist_ok=True)
-        outputs_dir.mkdir(exist_ok=True)
+        downloads_dir.mkdir(parents=True, exist_ok=True)
+        outputs_dir.mkdir(parents=True, exist_ok=True)
 
         arxiv_id = extract_arxiv_id(url)
         if not arxiv_id:
-            self._log("[ERROR] 无法识别 arXiv ID", "err")
-            self.root.after(0, lambda: self._set_mini_status("ID error", ERROR))
-            self._done()
+            add_log("[ERROR] 无法识别 arXiv ID")
+            set_mini("ID error", ERROR)
+            done()
             return
 
-        self._log(f"[INFO] 处理论文: {arxiv_id}")
-
-        # mini status 回调
-        def mini(msg, color=None):
-            self.root.after(0, lambda: self._set_mini_status(msg, color))
+        add_log(f"[INFO] 处理论文: {arxiv_id}")
 
         class LogWriter(io.StringIO):
             def write(self_, s):
                 if not s.strip():
                     return
-                tag = "ok" if s.startswith("[OK]") else \
-                      "err" if s.startswith("[ERROR]") else "info"
-                self._log(s.rstrip(), tag)
-                # 同步 mini status
-                if "下载" in s and "中" in s:
-                    mini("downloading...")
-                elif "下载完成" in s or "下载" in s and "OK" in s:
-                    mini("downloaded", SUCCESS)
-                elif "解压" in s and "中" in s:
-                    mini("extracting...")
-                elif "解压完成" in s:
-                    mini("extracted", SUCCESS)
-                elif "提取" in s and "正文" in s:
-                    mini("parsing...")
-                elif "已存在" in s:
-                    mini("cached", MUTED)
-                elif "[OK]" in s and "保存" in s:
-                    mini("done", SUCCESS)
+                add_log(s.rstrip())
+                if "Downloading..." in s or "Downloading" in s and "%" in s:
+                    set_mini("downloading...", MUTED)
+                elif "Download complete" in s:
+                    set_mini("downloaded", SUCCESS)
+                elif "Extracting" in s:
+                    set_mini("extracting...", MUTED)
+                elif "Expanding" in s:
+                    set_mini("expanding...", MUTED)
+                elif "Parsing body" in s:
+                    set_mini("parsing...", MUTED)
+                elif "Already cached" in s:
+                    set_mini("cached", MUTED)
+                elif "[OK]" in s and "saved" in s:
+                    set_mini("done", SUCCESS)
             def flush(self_): pass
 
         old_stdout = sys.stdout
         sys.stdout = LogWriter()
-        folder_name = None
         try:
             paper_dir, folder_name = download_source(arxiv_id, downloads_dir)
             if paper_dir:
                 result = extract_body_from_dir(paper_dir, outputs_dir, folder_name)
                 if result:
-                    self.output_dir = outputs_dir / folder_name
+                    output_dir = outputs_dir / folder_name
         finally:
             sys.stdout = old_stdout
 
-        if self.output_dir:
-            view = self.view_var.get()
-            path = self.output_dir / f"{view}.tex"
-            self.root.after(0, lambda: self._show_preview(path))
-            mini("done", SUCCESS)
-        self._done()
+        if output_dir:
+            page.run_thread(load_preview)
+            set_mini("done", SUCCESS)
+        done()
 
-    def _done(self):
-        self.run_btn.configure(state="normal")
-        if self.output_dir:
-            view = self.view_var.get()
-            self.copy_btn.configure(state="normal", text=f"Copy {view}.tex")
-            self.overwrite_btn.configure(state="normal")
-            self.open_btn.configure(state="normal")
-            self.strip_comments_btn.configure(state="normal")
+    def done():
+        run_btn._disabled = False
+        run_btn.bgcolor = ACCENT
+        run_btn.update()
+        if output_dir:
+            set_buttons_enabled(True)
+        page.update()
 
-    def _copy_current(self):
-        content = self.preview.get("1.0", "end-1c")
-        self.root.clipboard_clear()
-        self.root.clipboard_append(content)
-        view = self.view_var.get()
-        self.status.configure(text=f"Copied {view}.tex!")
-        self.root.after(2000, lambda: self.status.configure(text=""))
+    # ── preview 字数实时更新 ───────────────────────────────────
+    def on_preview_change(e):
+        update_word_count()
 
-    def _overwrite_file(self):
-        if not self.output_dir:
-            return
-        view = self.view_var.get()
-        path = self.output_dir / f"{view}.tex"
-        content = self.preview.get("1.0", "end-1c")
-        path.write_text(content, encoding="utf-8")
-        self.status.configure(text=f"Saved {view}.tex")
-        self.root.after(2000, lambda: self.status.configure(text=""))
+    preview_field.on_change = on_preview_change
+    view_dd.on_select       = on_view_change
+    show_log_chk.on_change  = on_show_log
+    run_btn.on_click        = on_run
+    url_field.on_submit     = on_run
+    url_field.on_submit     = on_run
 
-    def _open_folder(self):
-        if self.output_dir and self.output_dir.exists():
-            subprocess.Popen(f'explorer "{self.output_dir}"')
-
-    def _strip_comments(self):
-        import re
-        content = self.preview.get("1.0", "end-1c")
-        stripped = re.sub(r'(?<!\\)%.*', '', content)
-        stripped = re.sub(r'\n{3,}', '\n\n', stripped)
-        self.preview.edit_separator()  # 让 strip 作为一个独立 undo 单元
-        self.preview.delete("1.0", "end")
-        self.preview.insert("end", stripped.strip())
-        self.preview.edit_separator()
-        self._update_word_count()
-        self.status.configure(text="Comments stripped")
-        self.root.after(2000, lambda: self.status.configure(text=""))
-
-    def _undo_entry(self, event):
-        try:
-            self.entry.delete(0, "end")
-        except Exception:
-            pass
-        return "break"
+    # ── 布局 ──────────────────────────────────────────────────
+    page.add(
+        ft.Container(
+            expand=True,
+            bgcolor=BG,
+            padding=ft.Padding.only(left=24, right=24, top=18, bottom=14),
+            content=ft.Column(
+                expand=True,
+                spacing=0,
+                controls=[
+                    # 标题行
+                    ft.Row(
+                        spacing=6,
+                        vertical_alignment=ft.CrossAxisAlignment.END,
+                        controls=[
+                            ft.Text("ArxivCat", color=ACCENT, size=20,
+                                    font_family="Consolas", weight=ft.FontWeight.BOLD),
+                            ft.Text(AUTHOR,  color=MUTED, size=11, font_family="Consolas"),
+                            ft.Text(VERSION, color=MUTED, size=11, font_family="Consolas"),
+                        ]
+                    ),
+                    ft.Container(height=10),
+                    # 输入行
+                    ft.Row(
+                        spacing=8,
+                        controls=[url_field, run_btn]
+                    ),
+                    ft.Container(height=6),
+                    # 控制栏
+                    ft.Row(
+                        spacing=10,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        controls=[
+                            view_dd,
+                            show_log_chk,
+                            ft.Container(expand=True),
+                            mini_status,
+                        ]
+                    ),
+                    ft.Container(height=6),
+                    # log（默认隐藏）
+                    log_section,
+                    # preview header
+                    ft.Row(
+                        controls=[
+                            view_label,
+                            ft.Container(expand=True),
+                            word_count,
+                        ]
+                    ),
+                    ft.Container(height=2),
+                    # 预览区
+                    ft.Container(
+                        expand=True,
+                        bgcolor=PANEL,
+                        border_radius=6,
+                        padding=ft.Padding.symmetric(horizontal=8, vertical=6),
+                        content=preview_field,
+                    ),
+                    ft.Container(height=8),
+                    # 底部按钮行
+                    ft.Row(
+                        spacing=6,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        controls=[
+                            copy_btn,
+                            overwrite_btn,
+                            open_btn,
+                            strip_comments_btn,
+                            ft.Container(expand=True),
+                            status_text,
+                        ]
+                    ),
+                ]
+            )
+        )
+    )
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = ArxivCatGUI(root)
-    root.mainloop()
+    ft.run(main)
