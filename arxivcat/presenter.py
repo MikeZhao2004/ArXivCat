@@ -18,7 +18,7 @@ from arxivcat.core import (
     extract_body_from_dir,
 )
 
-VERSION = "v0.2.1"
+VERSION = "v0.3.0"
 AUTHOR = "by MikeDuke"
 
 
