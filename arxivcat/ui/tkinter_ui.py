@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import ctypes
+import os
 import sys
+import threading
 import tkinter as tk
 from tkinter import ttk
 from typing import Callable
+
+from google import genai
 
 from arxivcat.presenter import Presenter, VERSION, AUTHOR
 
@@ -112,9 +116,15 @@ class _RunButton(tk.Label):
 class TkApp:
     """Tkinter implementation of UIProtocol."""
 
+    CHAT_MODEL = "gemini-3.1-flash-lite-preview"
+
     def __init__(self):
         self._toast_after = None
         self._log_visible = False
+        self._chat_client = None
+        self._chat_after = None
+        self._chat_history: list[tuple[str, str]] = []
+        self._chat_placeholder = "Ask something about the current paper…"
         self._build()
         self._presenter = Presenter(self)
 
@@ -205,31 +215,155 @@ class TkApp:
         self._root.clipboard_append(self.get_preview_text())
         self.show_toast(f"Copied {self.get_view_mode()}.tex!")
 
+    def _set_chat_status(self, msg: str, color: str = MUTED):
+        self._root.after(0, lambda: (
+            self._chat_status_var.set(msg),
+            self._chat_status_lbl.config(fg=color),
+        ))
+
+    def _set_chat_busy(self, busy: bool):
+        def _do():
+            self._chat_busy = busy
+            self._chat_send_btn.set_enabled(not busy)
+            self._chat_reset_btn.set_enabled(not busy)
+            self._chat_input.config(state="disabled" if busy else "normal")
+        self._root.after(0, _do)
+
+    def _append_chat_message(self, speaker: str, content: str, color: str):
+        def _do():
+            self._chat_output.tag_config(f"{speaker}_tag", foreground=color, font=("Consolas", 10, "bold"))
+            self._chat_output.tag_config(f"{speaker}_body", foreground=TEXT)
+            self._chat_output.config(state="normal")
+            self._chat_output.insert("end", f"{speaker}\n", (f"{speaker}_tag",))
+            self._chat_output.insert("end", content.strip() + "\n\n", (f"{speaker}_body",))
+            self._chat_output.see("end")
+            self._chat_output.config(state="disabled")
+        self._root.after(0, _do)
+
+    def _get_chat_input(self) -> str:
+        value = self._chat_input.get("1.0", "end-1c").strip()
+        return "" if value == self._chat_placeholder else value
+
+    def _clear_chat_input(self):
+        self._chat_input.delete("1.0", "end")
+        self._chat_input.insert("1.0", self._chat_placeholder)
+        self._chat_input.config(fg=MUTED)
+
+    def _chat_focus_in(self, _):
+        if self._get_chat_input() == "" and self._chat_input.get("1.0", "end-1c").strip() == self._chat_placeholder:
+            self._chat_input.delete("1.0", "end")
+            self._chat_input.config(fg=TEXT)
+
+    def _chat_focus_out(self, _):
+        if not self._chat_input.get("1.0", "end-1c").strip():
+            self._clear_chat_input()
+
+    def _ensure_chat_client(self):
+        if self._chat_client is None:
+            api_key = os.getenv("GEMINI_API_KEY")
+            if not api_key:
+                raise ValueError("Missing GEMINI_API_KEY")
+            self._chat_client = genai.Client(api_key=api_key)
+        return self._chat_client
+
+    def _on_chat_send(self):
+        if getattr(self, "_chat_busy", False):
+            return
+        prompt = self._get_chat_input()
+        if not prompt:
+            self._set_chat_status("empty prompt", ERROR)
+            return
+
+        preview_text = self.get_preview_text().strip()
+        view_name = self.get_view_mode()
+        self._chat_history.append(("you", prompt))
+        self._append_chat_message("you", prompt, ACCENT)
+        self._chat_input.delete("1.0", "end")
+        self._chat_input.config(fg=TEXT)
+        self._set_chat_busy(True)
+        self._set_chat_status("thinking...", MUTED)
+
+        def _work():
+            try:
+                client = self._ensure_chat_client()
+                context = preview_text[:12000] if preview_text else "(no preview loaded)"
+                history = "\n\n".join(
+                    f"{speaker}: {message}" for speaker, message in self._chat_history[-12:]
+                )
+                full_prompt = (
+                    "You are a compact in-app chat assistant inside an arXiv paper extraction tool. "
+                    "Maintain conversation continuity using the chat history below. If the user asks a general question, answer it normally. "
+                    "If useful, you may also use the current paper preview as extra context.\n\n"
+                    f"Current view: {view_name}\n\n"
+                    f"Paper content snippet:\n{context}\n\n"
+                    f"Chat history:\n{history}"
+                )
+                response = client.models.generate_content(
+                    model=self.CHAT_MODEL,
+                    contents=full_prompt,
+                )
+                text = (response.text or "").strip() or "(empty response)"
+                self._chat_history.append(("gemini", text))
+                self._append_chat_message("gemini", text, SUCCESS)
+                self._set_chat_status(self.CHAT_MODEL, SUCCESS)
+            except Exception as exc:
+                self._append_chat_message("system", str(exc), ERROR)
+                self._set_chat_status("chat error", ERROR)
+            finally:
+                self._set_chat_busy(False)
+                self._root.after(0, self._clear_chat_input)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _on_chat_reset(self):
+        if getattr(self, "_chat_busy", False):
+            return
+        self._chat_history.clear()
+        self._chat_output.config(state="normal")
+        self._chat_output.delete("1.0", "end")
+        self._chat_output.config(state="disabled")
+        self._clear_chat_input()
+        self._set_chat_status("reset", MUTED)
+
     # ── build ─────────────────────────────────────────────────
 
     def _build(self):
         root = tk.Tk()
         _enable_windows_dpi(root)
         root.title("ArxivCat")
-        root.geometry("780x660")
-        root.minsize(560, 480)
+        root.geometry("1180x700")
+        root.minsize(900, 560)
         root.configure(bg=BG)
         self._root = root
+        self._chat_busy = False
 
         outer = tk.Frame(root, bg=BG)
         outer.pack(fill="both", expand=True, padx=24, pady=(18, 14))
-        self._main_col = outer
 
-        title_row = tk.Frame(outer, bg=BG)
+        split = tk.Frame(outer, bg=BG)
+        split.pack(fill="both", expand=True)
+
+        main_col = tk.Frame(split, bg=BG)
+        main_col.pack(side="left", fill="both", expand=True)
+        self._main_col = main_col
+
+        gutter = tk.Frame(split, bg=BG, width=14)
+        gutter.pack(side="left", fill="y")
+
+        chat_col = tk.Frame(split, bg=PANEL, width=320, padx=12, pady=12)
+        chat_col.pack(side="right", fill="y")
+        chat_col.pack_propagate(False)
+
+        title_row = tk.Frame(main_col, bg=BG)
         title_row.pack(fill="x")
         tk.Label(title_row, text="ArxivCat", bg=BG, fg=ACCENT,
                  font=("Consolas", 16, "bold")).pack(side="left")
         tk.Label(title_row, text=f"  {AUTHOR}  {VERSION}",
                  bg=BG, fg=MUTED, font=("Consolas", 9)).pack(side="left", pady=(4, 0))
 
-        tk.Frame(outer, bg=BG, height=10).pack(fill="x")
+        tk.Frame(main_col, bg=BG, height=10).pack(fill="x")
 
-        input_row = tk.Frame(outer, bg=BG)
+        input_row = tk.Frame(main_col, bg=BG)
         input_row.pack(fill="x")
         input_row.columnconfigure(0, weight=1)
 
@@ -264,9 +398,9 @@ class TkApp:
         self._run_btn = _RunButton(input_row, command=lambda: self._presenter.run_fetch())
         self._run_btn.grid(row=0, column=1)
 
-        tk.Frame(outer, bg=BG, height=6).pack(fill="x")
+        tk.Frame(main_col, bg=BG, height=6).pack(fill="x")
 
-        ctrl_row = tk.Frame(outer, bg=BG)
+        ctrl_row = tk.Frame(main_col, bg=BG)
         ctrl_row.pack(fill="x")
         self._ctrl_row = ctrl_row
 
@@ -325,9 +459,9 @@ class TkApp:
         )
         self._mini_lbl.pack(side="right")
 
-        tk.Frame(outer, bg=BG, height=4).pack(fill="x")
+        tk.Frame(main_col, bg=BG, height=4).pack(fill="x")
 
-        log_wrap = tk.Frame(outer, bg=PANEL, pady=4, padx=6)
+        log_wrap = tk.Frame(main_col, bg=PANEL, pady=4, padx=6)
         self._log_frame = log_wrap
 
         self._log_text = tk.Text(
@@ -345,7 +479,7 @@ class TkApp:
         self._log_text.tag_config(ERROR, foreground=ERROR)
         self._log_text.tag_config(TEXT, foreground=TEXT)
 
-        btn_row = tk.Frame(outer, bg=BG)
+        btn_row = tk.Frame(main_col, bg=BG)
         btn_row.pack(fill="x", side="bottom", pady=(8, 0))
 
         self._copy_btn = _FlatButton(btn_row, "Copy", self._on_copy)
@@ -360,8 +494,8 @@ class TkApp:
         tk.Label(btn_row, textvariable=self._toast_var,
                  bg=BG, fg=MUTED, font=("Consolas", 9)).pack(side="right")
 
-        tk.Frame(outer, bg=BG, height=2).pack(fill="x", side="top")
-        self._preview_header = tk.Frame(outer, bg=BG)
+        tk.Frame(main_col, bg=BG, height=2).pack(fill="x", side="top")
+        self._preview_header = tk.Frame(main_col, bg=BG)
         self._preview_header.pack(fill="x", side="top")
         self._view_label_var = tk.StringVar(value="body.tex")
         tk.Label(self._preview_header, textvariable=self._view_label_var,
@@ -370,7 +504,7 @@ class TkApp:
         tk.Label(self._preview_header, textvariable=self._wc_var,
                  bg=BG, fg=MUTED, font=("Consolas", 9)).pack(side="right")
 
-        preview_wrap = tk.Frame(outer, bg=PANEL)
+        preview_wrap = tk.Frame(main_col, bg=PANEL)
         preview_wrap.pack(fill="both", expand=True)
 
         preview_scroll = tk.Scrollbar(preview_wrap, bg=PANEL,
@@ -393,3 +527,74 @@ class TkApp:
         self._preview.pack(fill="both", expand=True)
         preview_scroll.config(command=self._preview.yview)
         self._preview.bind("<KeyRelease>", lambda e: self._update_word_count())
+
+        tk.Label(chat_col, text="chat", bg=PANEL, fg=ACCENT,
+                 font=("Consolas", 13, "bold")).pack(anchor="w")
+        tk.Label(chat_col, text=self.CHAT_MODEL, bg=PANEL, fg=MUTED,
+                 font=("Consolas", 8)).pack(anchor="w", pady=(2, 10))
+
+        chat_bottom = tk.Frame(chat_col, bg=PANEL)
+        chat_bottom.pack(fill="x", side="bottom")
+
+        self._chat_status_var = tk.StringVar(value="idle")
+        self._chat_status_lbl = tk.Label(
+            chat_bottom,
+            textvariable=self._chat_status_var,
+            bg=PANEL,
+            fg=MUTED,
+            font=("Consolas", 8),
+        )
+        self._chat_status_lbl.pack(anchor="w", pady=(0, 6))
+
+        self._chat_input = tk.Text(
+            chat_bottom,
+            height=5,
+            bg=BG,
+            fg=MUTED,
+            insertbackground=ACCENT,
+            font=("Consolas", 9),
+            relief="flat",
+            wrap="word",
+            padx=8,
+            pady=8,
+        )
+        self._chat_input.pack(fill="x")
+        self._clear_chat_input()
+        self._chat_input.bind("<FocusIn>", self._chat_focus_in)
+        self._chat_input.bind("<FocusOut>", self._chat_focus_out)
+        self._chat_input.bind("<Control-Return>", lambda e: (self._on_chat_send(), "break"))
+
+        chat_btn_row = tk.Frame(chat_bottom, bg=PANEL)
+        chat_btn_row.pack(fill="x", pady=(8, 0))
+
+        self._chat_send_btn = _FlatButton(chat_btn_row, "Send", self._on_chat_send)
+        self._chat_reset_btn = _FlatButton(chat_btn_row, "Reset", self._on_chat_reset)
+        self._chat_send_btn.pack(side="left", padx=(0, 6))
+        self._chat_reset_btn.pack(side="left")
+        self._chat_send_btn.set_enabled(True)
+        self._chat_reset_btn.set_enabled(True)
+
+        tk.Frame(chat_col, bg=PANEL, height=8).pack(fill="x", side="bottom")
+
+        chat_output_wrap = tk.Frame(chat_col, bg=BTN)
+        chat_output_wrap.pack(fill="both", expand=True)
+
+        chat_scroll = tk.Scrollbar(chat_output_wrap, bg=BTN,
+                                   troughcolor=BTN, activebackground=BTN_HOV)
+        chat_scroll.pack(side="right", fill="y")
+
+        self._chat_output = tk.Text(
+            chat_output_wrap,
+            bg=BTN,
+            fg=TEXT,
+            insertbackground=ACCENT,
+            font=("Consolas", 9),
+            relief="flat",
+            wrap="word",
+            state="disabled",
+            yscrollcommand=chat_scroll.set,
+            padx=8,
+            pady=8,
+        )
+        self._chat_output.pack(fill="both", expand=True)
+        chat_scroll.config(command=self._chat_output.yview)
