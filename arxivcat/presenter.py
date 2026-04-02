@@ -1,12 +1,10 @@
 """Presenter: all business logic. Zero dependency on any UI framework."""
 from __future__ import annotations
 
-import io
 import os
 import re
 import shutil
 import subprocess
-import sys
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -20,8 +18,8 @@ from arxivcat.core import (
     extract_body_from_dir,
 )
 
-VERSION = "v0.2.0"
-AUTHOR  = "by MikeDuke"
+VERSION = "v0.2.1"
+AUTHOR = "by MikeDuke"
 
 
 class Presenter:
@@ -57,9 +55,6 @@ class Presenter:
         self.output_dir = None
         threading.Thread(target=self._process, args=(url,), daemon=True).start()
 
-    def copy_preview(self):
-        return self.ui.get_preview_text()
-
     def overwrite_file(self):
         if not self.output_dir:
             return
@@ -85,6 +80,23 @@ class Presenter:
 
     # ── internal ──────────────────────────────────────────────
 
+    def _emit_log(self, msg: str):
+        self.ui.add_log(msg)
+        if "Downloading" in msg and "%" in msg:
+            self.ui.set_mini_status("downloading...", "info")
+        elif "Download complete" in msg:
+            self.ui.set_mini_status("downloaded", "ok")
+        elif "Extracting" in msg:
+            self.ui.set_mini_status("extracting...", "info")
+        elif "Expanding" in msg:
+            self.ui.set_mini_status("expanding...", "info")
+        elif "Parsing body" in msg:
+            self.ui.set_mini_status("parsing...", "info")
+        elif "Already cached" in msg:
+            self.ui.set_mini_status("cached", "info")
+        elif "[OK]" in msg and "saved" in msg:
+            self.ui.set_mini_status("done", "ok")
+
     def _load_preview(self):
         if not self.output_dir:
             return
@@ -96,7 +108,7 @@ class Presenter:
     def _process(self, url: str):
         base = Path(os.environ.get("APPDATA", Path.home())) / "ArxivCat"
         downloads_dir = base / "downloads"
-        outputs_dir   = base / "outputs"
+        outputs_dir = base / "outputs"
         downloads_dir.mkdir(parents=True, exist_ok=True)
         outputs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -109,39 +121,11 @@ class Presenter:
 
         self.ui.add_log(f"[INFO] 处理论文: {arxiv_id}")
 
-        # redirect stdout from core functions to ui log
-        class LogWriter(io.StringIO):
-            def write(self_, s):
-                s = s.rstrip()
-                if not s:
-                    return
-                self.ui.add_log(s)
-                if "Downloading" in s and "%" in s:
-                    self.ui.set_mini_status("downloading...", "info")
-                elif "Download complete" in s:
-                    self.ui.set_mini_status("downloaded", "ok")
-                elif "Extracting" in s:
-                    self.ui.set_mini_status("extracting...", "info")
-                elif "Expanding" in s:
-                    self.ui.set_mini_status("expanding...", "info")
-                elif "Parsing body" in s:
-                    self.ui.set_mini_status("parsing...", "info")
-                elif "Already cached" in s:
-                    self.ui.set_mini_status("cached", "info")
-                elif "[OK]" in s and "saved" in s:
-                    self.ui.set_mini_status("done", "ok")
-            def flush(self_): pass
-
-        old_stdout = sys.stdout
-        sys.stdout = LogWriter()
-        try:
-            paper_dir, folder_name = download_source(arxiv_id, downloads_dir)
-            if paper_dir:
-                result = extract_body_from_dir(paper_dir, outputs_dir, folder_name)
-                if result:
-                    self.output_dir = outputs_dir / folder_name
-        finally:
-            sys.stdout = old_stdout
+        paper_dir, folder_name = download_source(arxiv_id, downloads_dir, log=self._emit_log)
+        if paper_dir:
+            result = extract_body_from_dir(paper_dir, outputs_dir, folder_name, log=self._emit_log)
+            if result:
+                self.output_dir = outputs_dir / folder_name
 
         if self.output_dir:
             self._load_preview()

@@ -1,54 +1,32 @@
 # ArxivCat
 
-Downloads an arXiv paper's LaTeX source and extracts the main text.
+下载 arXiv 的 LaTeX source，展开 `\input` / `\include`，导出 `body.tex` 和 `appendix.tex`。
 
-## What it does
+## 用法
 
-1. Fetches the paper title from the arXiv page
-2. Downloads and unpacks the `.tar.gz` source from `arxiv.org/src/{id}`
-3. Recursively expands `\input{}` references
-4. Splits content into `body.tex` (abstract → conclusion) and `appendix.tex` (if present)
-5. Saves to `outputs/{id}_{title}/`
-
-Source files are cached under `downloads/{id}_{title}/` and skipped on re-run.
-
-## Usage
-
-**CLI**
-```bash
-python arxivcat.py --url 2511.16655
-python arxivcat.py --url https://arxiv.org/abs/2511.16655
-```
-
-**GUI**
-```bash
-python gui.py
-```
-
-Requires the `flet` environment: `conda activate flet`
-
-## Output
-
-```
-downloads/
-  2511_16655_{title}/       # raw source (cached)
-
-outputs/
-  2511_16655_{title}/
-    body.tex
-    appendix.tex            # if present
-```
-
-## Requirements
-
-Python 3.8+
+GUI:
 
 ```bash
-pip install requests flet
+python main.py
 ```
 
-## Notes
+CLI:
 
-- Not all papers have LaTeX source available on arXiv
-- Multi-file projects with non-standard structures may not parse correctly
-- Appendix extraction requires an explicit `\appendix` command in the source
+```bash
+python cli.py --url 2601.11514
+python cli.py --url https://arxiv.org/abs/2601.11514
+python cli.py --url https://arxiv.org/pdf/2601.11514
+```
+
+## 输出
+
+- 缓存：`%APPDATA%/ArxivCat/downloads/`
+- 结果：`%APPDATA%/ArxivCat/outputs/`
+
+缓存坏了会自动重下；如果旧目录被系统锁住，会写到 `*_freshN` 目录。
+
+## 依赖
+
+```bash
+pip install -r requirements.txt
+```

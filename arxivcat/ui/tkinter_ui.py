@@ -1,7 +1,8 @@
 """Tkinter UI backend – dark Catppuccin theme, mirrors the Flet layout."""
 from __future__ import annotations
 
-import threading
+import ctypes
+import sys
 import tkinter as tk
 from tkinter import ttk
 from typing import Callable
@@ -21,6 +22,26 @@ BTN_HOV = "#45475a"
 RUN_HOV = "#74c7ec"
 
 
+def _enable_windows_dpi(root: tk.Tk) -> None:
+    if sys.platform != "win32":
+        return
+
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+    try:
+        dpi = ctypes.windll.user32.GetDpiForWindow(root.winfo_id())
+        if dpi > 0:
+            root.tk.call("tk", "scaling", dpi / 72.0)
+    except Exception:
+        pass
+
+
 class _FlatButton(tk.Label):
     """Clickable label styled like the Flet container buttons."""
 
@@ -34,8 +55,8 @@ class _FlatButton(tk.Label):
         )
         self._command = command
         self._enabled = False
-        self.bind("<Enter>",   self._on_enter)
-        self.bind("<Leave>",   self._on_leave)
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
         self.bind("<Button-1>", self._on_click)
 
     def set_enabled(self, enabled: bool):
@@ -67,8 +88,8 @@ class _RunButton(tk.Label):
         )
         self._command = command
         self._busy = False
-        self.bind("<Enter>",    self._on_enter)
-        self.bind("<Leave>",    self._on_leave)
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
         self.bind("<Button-1>", self._on_click)
 
     def set_busy(self, busy: bool):
@@ -100,8 +121,7 @@ class TkApp:
     # ── UIProtocol ────────────────────────────────────────────
 
     def add_log(self, msg: str) -> None:
-        color = SUCCESS if msg.startswith("[OK]") \
-            else ERROR if msg.startswith("[ERROR]") else TEXT
+        color = SUCCESS if msg.startswith("[OK]") else ERROR if msg.startswith("[ERROR]") else TEXT
         self._log_text.config(state="normal")
         self._log_text.insert("end", msg + "\n", (color,))
         self._log_text.see("end")
@@ -174,9 +194,7 @@ class TkApp:
             self._log_frame.pack_forget()
             self._log_visible = False
         else:
-            # insert between controls bar and preview header (top-stacking)
-            self._log_frame.pack(fill="x", side="top",
-                                 after=self._ctrl_row, pady=(0, 4))
+            self._log_frame.pack(fill="x", side="top", after=self._ctrl_row, pady=(0, 4))
             self._log_visible = True
 
     def _on_view_change(self, *_):
@@ -191,6 +209,7 @@ class TkApp:
 
     def _build(self):
         root = tk.Tk()
+        _enable_windows_dpi(root)
         root.title("ArxivCat")
         root.geometry("780x660")
         root.minsize(560, 480)
@@ -201,7 +220,6 @@ class TkApp:
         outer.pack(fill="both", expand=True, padx=24, pady=(18, 14))
         self._main_col = outer
 
-        # ── title row ─────────────────────────────────────────
         title_row = tk.Frame(outer, bg=BG)
         title_row.pack(fill="x")
         tk.Label(title_row, text="ArxivCat", bg=BG, fg=ACCENT,
@@ -211,7 +229,6 @@ class TkApp:
 
         tk.Frame(outer, bg=BG, height=10).pack(fill="x")
 
-        # ── URL input row ──────────────────────────────────────
         input_row = tk.Frame(outer, bg=BG)
         input_row.pack(fill="x")
         input_row.columnconfigure(0, weight=1)
@@ -240,16 +257,15 @@ class TkApp:
                 url_entry.insert(0, self._placeholder)
                 url_entry.config(fg=MUTED)
 
-        url_entry.bind("<FocusIn>",  _focus_in)
+        url_entry.bind("<FocusIn>", _focus_in)
         url_entry.bind("<FocusOut>", _focus_out)
-        url_entry.bind("<Return>",   lambda e: self._presenter.run_fetch())
+        url_entry.bind("<Return>", lambda e: self._presenter.run_fetch())
 
         self._run_btn = _RunButton(input_row, command=lambda: self._presenter.run_fetch())
         self._run_btn.grid(row=0, column=1)
 
         tk.Frame(outer, bg=BG, height=6).pack(fill="x")
 
-        # ── controls bar ──────────────────────────────────────
         ctrl_row = tk.Frame(outer, bg=BG)
         ctrl_row.pack(fill="x")
         self._ctrl_row = ctrl_row
@@ -257,15 +273,24 @@ class TkApp:
         self._view_var = tk.StringVar(value="body")
         style = ttk.Style()
         style.theme_use("clam")
-        style.configure("AC.TCombobox",
-                        fieldbackground=PANEL, background=PANEL,
-                        foreground=TEXT, selectbackground=PANEL,
-                        selectforeground=TEXT, arrowcolor=MUTED,
-                        bordercolor=MUTED, lightcolor=PANEL, darkcolor=PANEL)
-        style.map("AC.TCombobox",
-                  fieldbackground=[("readonly", PANEL)],
-                  foreground=[("readonly", TEXT)])
-        view_dd = ttk.Combobox(
+        style.configure(
+            "AC.TCombobox",
+            fieldbackground=PANEL,
+            background=PANEL,
+            foreground=TEXT,
+            selectbackground=PANEL,
+            selectforeground=TEXT,
+            arrowcolor=MUTED,
+            bordercolor=MUTED,
+            lightcolor=PANEL,
+            darkcolor=PANEL,
+        )
+        style.map(
+            "AC.TCombobox",
+            fieldbackground=[("readonly", PANEL)],
+            foreground=[("readonly", TEXT)],
+        )
+        ttk.Combobox(
             ctrl_row,
             textvariable=self._view_var,
             values=["body", "appendix"],
@@ -273,8 +298,7 @@ class TkApp:
             width=10,
             font=("Consolas", 10),
             style="AC.TCombobox",
-        )
-        view_dd.pack(side="left")
+        ).pack(side="left")
         self._view_var.trace_add("write", self._on_view_change)
 
         show_log_var = tk.BooleanVar(value=False)
@@ -282,28 +306,34 @@ class TkApp:
             ctrl_row,
             text="show log",
             variable=show_log_var,
-            bg=BG, fg=MUTED,
-            activebackground=BG, activeforeground=TEXT,
+            bg=BG,
+            fg=MUTED,
+            activebackground=BG,
+            activeforeground=TEXT,
             selectcolor=BG,
             font=("Consolas", 9),
             command=self._toggle_log,
         ).pack(side="left", padx=(10, 0))
 
         self._mini_var = tk.StringVar()
-        self._mini_lbl = tk.Label(ctrl_row, textvariable=self._mini_var,
-                                  bg=BG, fg=MUTED, font=("Consolas", 10))
+        self._mini_lbl = tk.Label(
+            ctrl_row,
+            textvariable=self._mini_var,
+            bg=BG,
+            fg=MUTED,
+            font=("Consolas", 10),
+        )
         self._mini_lbl.pack(side="right")
 
         tk.Frame(outer, bg=BG, height=4).pack(fill="x")
 
-        # ── log panel (hidden by default) ──────────────────────
-        # Built but not packed; _toggle_log will pack/unpack it.
         log_wrap = tk.Frame(outer, bg=PANEL, pady=4, padx=6)
         self._log_frame = log_wrap
 
         self._log_text = tk.Text(
             log_wrap,
-            bg=PANEL, fg=TEXT,
+            bg=PANEL,
+            fg=TEXT,
             font=("Consolas", 9),
             height=10,
             relief="flat",
@@ -312,30 +342,24 @@ class TkApp:
         )
         self._log_text.pack(fill="both", expand=True)
         self._log_text.tag_config(SUCCESS, foreground=SUCCESS)
-        self._log_text.tag_config(ERROR,   foreground=ERROR)
-        self._log_text.tag_config(TEXT,    foreground=TEXT)
+        self._log_text.tag_config(ERROR, foreground=ERROR)
+        self._log_text.tag_config(TEXT, foreground=TEXT)
 
-        # ── pack bottom-anchored widgets FIRST so they always show ────────────
-        # Order of side="bottom" packs is bottom-to-top, so pack in reverse.
-
-        # 1. button row (lowest)
         btn_row = tk.Frame(outer, bg=BG)
         btn_row.pack(fill="x", side="bottom", pady=(8, 0))
 
-        self._copy_btn      = _FlatButton(btn_row, "Copy",           self._on_copy)
-        self._overwrite_btn = _FlatButton(btn_row, "Overwrite",      lambda: self._presenter.overwrite_file())
-        self._open_btn      = _FlatButton(btn_row, "Open Folder",    lambda: self._presenter.open_folder())
-        self._strip_btn     = _FlatButton(btn_row, "Strip Comments", lambda: self._presenter.strip_comments())
+        self._copy_btn = _FlatButton(btn_row, "Copy", self._on_copy)
+        self._overwrite_btn = _FlatButton(btn_row, "Overwrite", lambda: self._presenter.overwrite_file())
+        self._open_btn = _FlatButton(btn_row, "Open Folder", lambda: self._presenter.open_folder())
+        self._strip_btn = _FlatButton(btn_row, "Strip Comments", lambda: self._presenter.strip_comments())
 
-        for b in (self._copy_btn, self._overwrite_btn,
-                  self._open_btn, self._strip_btn):
+        for b in (self._copy_btn, self._overwrite_btn, self._open_btn, self._strip_btn):
             b.pack(side="left", padx=(0, 6))
 
         self._toast_var = tk.StringVar()
         tk.Label(btn_row, textvariable=self._toast_var,
                  bg=BG, fg=MUTED, font=("Consolas", 9)).pack(side="right")
 
-        # 2. preview header (above preview, below log)
         tk.Frame(outer, bg=BG, height=2).pack(fill="x", side="top")
         self._preview_header = tk.Frame(outer, bg=BG)
         self._preview_header.pack(fill="x", side="top")
@@ -346,7 +370,6 @@ class TkApp:
         tk.Label(self._preview_header, textvariable=self._wc_var,
                  bg=BG, fg=MUTED, font=("Consolas", 9)).pack(side="right")
 
-        # 3. preview area fills whatever space remains
         preview_wrap = tk.Frame(outer, bg=PANEL)
         preview_wrap.pack(fill="both", expand=True)
 
@@ -356,13 +379,15 @@ class TkApp:
 
         self._preview = tk.Text(
             preview_wrap,
-            bg=PANEL, fg=TEXT,
+            bg=PANEL,
+            fg=TEXT,
             insertbackground=ACCENT,
             font=("Consolas", 10),
             relief="flat",
             wrap="word",
             yscrollcommand=preview_scroll.set,
-            padx=8, pady=6,
+            padx=8,
+            pady=6,
             undo=True,
         )
         self._preview.pack(fill="both", expand=True)

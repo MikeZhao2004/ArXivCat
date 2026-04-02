@@ -3,11 +3,19 @@ import requests
 import tarfile
 import re
 import shutil
-import argparse
+import tempfile
 from pathlib import Path
+from typing import Callable
+
+
+LogFn = Callable[[str], None]
 
 
 # ── Utilities ─────────────────────────────────────────────────
+
+def _log(log: LogFn | None, msg: str) -> None:
+    (log or print)(msg)
+
 
 def extract_arxiv_id(input_str):
     match = re.search(r'(\d+\.\d+)', input_str)
@@ -20,7 +28,7 @@ def sanitize_filename(name):
     return name.strip('_')[:80]
 
 
-def fetch_title_from_arxiv(arxiv_id):
+def fetch_title_from_arxiv(arxiv_id, log: LogFn | None = None):
     try:
         resp = requests.get(f"https://arxiv.org/abs/{arxiv_id}", timeout=15)
         resp.raise_for_status()
@@ -28,26 +36,129 @@ def fetch_title_from_arxiv(arxiv_id):
         if m:
             return m.group(1).strip()
     except Exception as e:
-        print(f"[WARN] Failed to fetch title: {e}")
+        _log(log, f"[WARN] Failed to fetch title: {e}")
     return None
 
 
 # ── Download & Extract ────────────────────────────────────────
 
-def download_source(arxiv_id, downloads_dir):
+def _can_walk_dir(path: Path) -> bool:
+    try:
+        for _ in path.rglob("*"):
+            pass
+        return True
+    except Exception:
+        return False
+
+
+def _can_read_tex_files(path: Path) -> bool:
+    try:
+        tex_files = list(path.rglob("*.tex"))
+    except Exception:
+        return False
+
+    if not tex_files:
+        return False
+
+    for p in tex_files:
+        try:
+            p.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return False
+    return True
+
+
+def _all_inputs_readable(main_tex: Path, paper_dir: Path) -> bool:
+    try:
+        content = main_tex.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return False
+
+    content = _strip_latex_comments(content)
+    refs = re.findall(r'\\(?:input|include)\s*\{([^}]+)\}', content)
+    for ref in refs:
+        name = ref.strip()
+        if not name.endswith('.tex'):
+            name += '.tex'
+        p = (paper_dir / name).resolve()
+        if not p.exists() or not p.is_file():
+            return False
+        try:
+            p.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return False
+
+    return True
+
+
+def _repair_permissions(path: Path) -> None:
+    for p in path.rglob("*"):
+        try:
+            os.chmod(p, 0o777 if p.is_dir() else 0o666)
+        except Exception:
+            pass
+
+
+def _strip_latex_comments(tex_content: str) -> str:
+    return re.sub(r'(?<!\\)%.*', '', tex_content)
+
+
+def _is_safe_tar_member(member: tarfile.TarInfo, target_dir: Path) -> bool:
+    target_dir = target_dir.resolve()
+    member_path = (target_dir / member.name).resolve()
+    return member_path == target_dir or target_dir in member_path.parents
+
+
+def download_source(arxiv_id, downloads_dir, log: LogFn | None = None):
     """Download and unpack arXiv source. Returns (paper_dir, folder_name)."""
-    print(f"[INFO] Fetching title for {arxiv_id}...")
-    title = fetch_title_from_arxiv(arxiv_id) or "unknown"
-    print(f"[INFO] Title: {title}")
+    _log(log, f"[INFO] Fetching title for {arxiv_id}...")
+    title = fetch_title_from_arxiv(arxiv_id, log=log) or "unknown"
+    _log(log, f"[INFO] Title: {title}")
 
     folder_name = f"{arxiv_id.replace('.', '_')}_{sanitize_filename(title)}"
     paper_dir = downloads_dir / folder_name
 
-    if paper_dir.exists() and any(paper_dir.glob("*.tex")):
-        print(f"[INFO] Already cached, skipping download.")
-        return paper_dir, folder_name
+    if paper_dir.exists():
+        main_tex = find_main_tex(paper_dir)
+        cache_ok = (
+            main_tex is not None
+            and _can_walk_dir(paper_dir)
+            and _can_read_tex_files(paper_dir)
+            and _all_inputs_readable(main_tex, paper_dir)
+        )
+        if cache_ok:
+            _log(log, "[INFO] Already cached, skipping download.")
+            return paper_dir, folder_name
 
-    print("[INFO] Downloading source...")
+        _log(log, "[WARN] Cache exists but is not readable. Repairing cache permissions...")
+        _repair_permissions(paper_dir)
+
+        main_tex = find_main_tex(paper_dir)
+        cache_ok = (
+            main_tex is not None
+            and _can_walk_dir(paper_dir)
+            and _can_read_tex_files(paper_dir)
+            and _all_inputs_readable(main_tex, paper_dir)
+        )
+        if cache_ok:
+            _log(log, "[INFO] Cache repaired, skipping download.")
+            return paper_dir, folder_name
+
+        _log(log, "[WARN] Cache still broken. Re-downloading source...")
+        try:
+            shutil.rmtree(paper_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+        if paper_dir.exists():
+            suffix = 1
+            while (downloads_dir / f"{folder_name}_fresh{suffix}").exists():
+                suffix += 1
+            folder_name = f"{folder_name}_fresh{suffix}"
+            paper_dir = downloads_dir / folder_name
+            _log(log, f"[WARN] Old cache locked; using new cache dir: {folder_name}")
+
+    _log(log, "[INFO] Downloading source...")
     try:
         resp = requests.get(
             f"https://arxiv.org/src/{arxiv_id}",
@@ -56,7 +167,7 @@ def download_source(arxiv_id, downloads_dir):
         )
         resp.raise_for_status()
     except Exception as e:
-        print(f"[ERROR] Download failed: {e}")
+        _log(log, f"[ERROR] Download failed: {e}")
         return None, None
 
     total = int(resp.headers.get("content-length", 0))
@@ -73,56 +184,94 @@ def download_source(arxiv_id, downloads_dir):
                 if total:
                     pct = int(downloaded / total * 100)
                     if pct != last_pct and pct % 10 == 0:
-                        print(f"[INFO] Downloading... {pct}% ({downloaded // 1024} KB / {total // 1024} KB)")
+                        _log(log, f"[INFO] Downloading... {pct}% ({downloaded // 1024} KB / {total // 1024} KB)")
                         last_pct = pct
                 else:
                     kb = downloaded // 1024
                     if kb % 200 == 0 and kb != 0:
-                        print(f"[INFO] Downloading... {kb} KB received")
+                        _log(log, f"[INFO] Downloading... {kb} KB received")
 
-    print(f"[OK] Download complete ({downloaded // 1024} KB)")
+    _log(log, f"[OK] Download complete ({downloaded // 1024} KB)")
 
-    print("[INFO] Extracting archive...")
-    temp_dir = downloads_dir / arxiv_id
-    temp_dir.mkdir(exist_ok=True)
+    _log(log, "[INFO] Extracting archive...")
+    temp_dir = Path(tempfile.mkdtemp(prefix=f"{arxiv_id}_", dir=str(downloads_dir)))
     try:
         with tarfile.open(temp_tar, 'r:gz') as tar:
             members = tar.getmembers()
             for i, member in enumerate(members):
+                if not _is_safe_tar_member(member, temp_dir):
+                    _log(log, f"[WARN] Skipping suspicious path: {member.name}")
+                    continue
                 tar.extract(member, temp_dir)
                 if len(members) > 0 and (i + 1) % max(1, len(members) // 5) == 0:
                     pct = int((i + 1) / len(members) * 100)
-                    print(f"[INFO] Extracting... {pct}% ({i + 1}/{len(members)} files)")
+                    _log(log, f"[INFO] Extracting... {pct}% ({i + 1}/{len(members)} files)")
     except Exception as e:
-        print(f"[ERROR] Extraction failed: {e}")
+        _log(log, f"[ERROR] Extraction failed: {e}")
         return None, None
 
     paper_dir.mkdir(parents=True, exist_ok=True)
     for item in temp_dir.iterdir():
         dest = paper_dir / item.name
         if dest.exists():
-            shutil.rmtree(dest) if dest.is_dir() else dest.unlink()
+            try:
+                shutil.rmtree(dest) if dest.is_dir() else dest.unlink()
+            except Exception:
+                suffix = 1
+                while (downloads_dir / f"{folder_name}_fresh{suffix}").exists():
+                    suffix += 1
+                folder_name = f"{folder_name}_fresh{suffix}"
+                paper_dir = downloads_dir / folder_name
+                paper_dir.mkdir(parents=True, exist_ok=True)
+                _log(log, f"[WARN] Existing cache item locked; using new cache dir: {folder_name}")
+                dest = paper_dir / item.name
         shutil.move(str(item), str(dest))
 
-    temp_dir.rmdir()
+    shutil.rmtree(temp_dir, ignore_errors=True)
     temp_tar.unlink()
-    print(f"[OK] Source saved to: {paper_dir}")
+    _log(log, f"[OK] Source saved to: {paper_dir}")
     return paper_dir, folder_name
 
 
 # ── TeX Extraction ────────────────────────────────────────────
 
-def expand_inputs(tex_content, base_dir):
+def expand_inputs(tex_content, base_dir, _seen=None, root_dir=None):
     """Recursively expand all \\input{} and \\include{} commands."""
+    tex_content = _strip_latex_comments(tex_content)
+    if _seen is None:
+        _seen = set()
+    if root_dir is None:
+        root_dir = base_dir
+
     def replace_input(match):
         filename = match.group(1).strip()
         if not filename.endswith('.tex'):
             filename += '.tex'
-        filepath = base_dir / filename
-        if filepath.exists():
+
+        candidates = [
+            (base_dir / filename).resolve(),
+            (root_dir / filename).resolve(),
+        ]
+
+        filepath = None
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_file():
+                filepath = candidate
+                break
+
+        if filepath is None:
+            return match.group(0)
+        if filepath in _seen:
+            return match.group(0)
+
+        try:
             sub = filepath.read_text(encoding='utf-8', errors='ignore')
-            return expand_inputs(sub, filepath.parent)
-        return match.group(0)
+        except Exception:
+            return match.group(0)
+
+        _seen.add(filepath)
+        return expand_inputs(sub, filepath.parent, _seen, root_dir)
+
     return re.sub(r'\\(?:input|include)\s*\{([^}]+)\}', replace_input, tex_content)
 
 
@@ -144,6 +293,7 @@ def extract_body_and_appendix(tex_content):
     """Extract body and appendix. Returns (body, appendix, error)."""
     abstract_match = re.search(r'\\begin\{abstract\}', tex_content)
     first_section_match = re.search(r'\\section\s*[\*]?\s*\{', tex_content)
+    doc_start_match = re.search(r'\\begin\{document\}', tex_content)
 
     if abstract_match and first_section_match:
         start = min(abstract_match.start(), first_section_match.start())
@@ -151,8 +301,10 @@ def extract_body_and_appendix(tex_content):
         start = abstract_match.start()
     elif first_section_match:
         start = first_section_match.start()
+    elif doc_start_match:
+        start = doc_start_match.end()
     else:
-        return None, None, "Could not find abstract or first section"
+        return None, None, "Could not find abstract, first section, or document start"
 
     conclusion_matches = list(re.finditer(
         r'\\section\*?\s*\{[^}]*(?:[Cc]onclusion|[Ss]ummary)[^}]*\}', tex_content
@@ -202,22 +354,30 @@ def extract_body_and_appendix(tex_content):
     return body, appendix, None
 
 
-def extract_body_from_dir(paper_dir, output_dir, folder_name):
+def extract_body_from_dir(paper_dir, output_dir, folder_name, log: LogFn | None = None):
     """Extract body and appendix from paper directory."""
     main_tex = find_main_tex(paper_dir)
     if not main_tex:
-        print("[ERROR] Could not find main .tex file")
+        _log(log, "[ERROR] Could not find main .tex file")
         return None
-    print(f"[INFO] Main file: {main_tex.name}")
+    _log(log, f"[INFO] Main file: {main_tex.name}")
+
+    if not _all_inputs_readable(main_tex, paper_dir):
+        _log(log, "[ERROR] Required \\input/\\include files are missing or unreadable")
+        return None
 
     content = main_tex.read_text(encoding='utf-8', errors='ignore')
-    print("[INFO] Expanding \\input references...")
+    _log(log, "[INFO] Expanding \\input references...")
     expanded = expand_inputs(content, paper_dir)
 
-    print("[INFO] Parsing body (abstract → conclusion)...")
+    if re.search(r'\\(?:input|include)\s*\{', expanded):
+        _log(log, "[ERROR] Input expansion incomplete; unresolved \\input/\\include remains")
+        return None
+
+    _log(log, "[INFO] Parsing body (abstract → conclusion)...")
     body, appendix, err = extract_body_and_appendix(expanded)
     if err:
-        print(f"[ERROR] {err}")
+        _log(log, f"[ERROR] {err}")
         return None
 
     out_dir = output_dir / folder_name
@@ -225,45 +385,13 @@ def extract_body_from_dir(paper_dir, output_dir, folder_name):
 
     out_path = out_dir / "body.tex"
     out_path.write_text(body, encoding='utf-8')
-    print(f"[OK] body.tex saved ({len(body)} chars, {body.count(chr(10))} lines)")
+    _log(log, f"[OK] body.tex saved ({len(body)} chars, {body.count(chr(10))} lines)")
 
     if appendix:
         app_path = out_dir / "appendix.tex"
         app_path.write_text(appendix, encoding='utf-8')
-        print(f"[OK] appendix.tex saved ({len(appendix)} chars, {appendix.count(chr(10))} lines)")
+        _log(log, f"[OK] appendix.tex saved ({len(appendix)} chars, {appendix.count(chr(10))} lines)")
     else:
-        print("[INFO] No appendix detected")
+        _log(log, "[INFO] No appendix detected")
 
     return out_path
-
-
-# ── CLI Entry ─────────────────────────────────────────────────
-
-def main():
-    parser = argparse.ArgumentParser(description="ArxivCat: download and extract arXiv paper source")
-    parser.add_argument("--url", required=True,
-                        help="arXiv ID or URL, e.g. 2511.16655 or https://arxiv.org/abs/2511.16655")
-    args = parser.parse_args()
-
-    arxiv_id = extract_arxiv_id(args.url)
-    if not arxiv_id:
-        print("[ERROR] Could not parse arXiv ID")
-        return
-
-    print(f"[INFO] Processing paper: {arxiv_id}")
-
-    base = Path(os.environ.get("APPDATA", Path.home())) / "ArxivCat"
-    downloads_dir = base / "downloads"
-    outputs_dir = base / "outputs"
-    downloads_dir.mkdir(parents=True, exist_ok=True)
-    outputs_dir.mkdir(parents=True, exist_ok=True)
-
-    paper_dir, folder_name = download_source(arxiv_id, downloads_dir)
-    if not paper_dir:
-        return
-
-    extract_body_from_dir(paper_dir, outputs_dir, folder_name)
-
-
-if __name__ == "__main__":
-    main()
