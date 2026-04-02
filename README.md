@@ -1,4 +1,4 @@
-# ArxivCat
+# ArXivCat
 
 下载 arXiv 的 LaTeX source，展开 `\input` / `\include`，导出 `body.tex` 和 `appendix.tex`。
 
@@ -30,3 +30,4 @@ python cli.py --url https://arxiv.org/pdf/2601.11514
 ```bash
 pip install -r requirements.txt
 ```
+
