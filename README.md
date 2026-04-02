@@ -2,46 +2,44 @@
 
 [中文说明](README_zh.md)
 
-ArXivCat is a small desktop tool for downloading arXiv source packages, expanding LaTeX `\input` / `\include`, and exporting cleaner paper text into `body.tex` and `appendix.tex`.
+ArXivCat is a small desktop tool for working with arXiv LaTeX source packages.
+It downloads the source, expands LaTeX `\input` / `\include`, and exports cleaner paper text into `body.tex` and `appendix.tex`.
 
-It is designed for a practical workflow: paste an arXiv URL or ID, inspect the extracted result, make small edits, and optionally ask a lightweight Gemini chat panel about the currently loaded paper content.
+The project is meant for a simple workflow: paste an arXiv URL or ID, inspect the extracted text, make small edits, and optionally use the built-in Gemini chat panel to ask quick questions about the current paper content.
 
 ![ArXivCat screenshot](assets/screenshot.png)
 
-## What it does
+## Features
 
-- downloads arXiv source tarballs from an arXiv URL, PDF URL, or raw arXiv ID
-- extracts the source into a local cache
-- expands nested LaTeX `\input` and `\include`
-- detects the main TeX file and exports:
+- download source packages from an arXiv URL, PDF URL, or raw arXiv ID
+- extract and cache arXiv source locally
+- recursively expand nested LaTeX `\input` and `\include`
+- detect the main TeX file automatically
+- export:
   - `body.tex`
   - `appendix.tex` when available
-- provides a Tkinter GUI for previewing and editing extracted content
-- includes a small right-side Gemini chat panel with resettable short-term memory
+- preview and lightly edit extracted text in a Tkinter GUI
+- use a lightweight Gemini chat panel on the right side
 
-## What it does not try to do
+## Scope
 
 ArXivCat is intentionally narrow in scope.
 
-- It does not try to be a full LaTeX compiler.
-- It does not promise perfect parsing for every paper source tree.
-- The chat panel is helpful for lightweight reading assistance, but it is not a full retrieval system.
-
-## Screenshot
-
-The screenshot above is referenced with a relative path so it renders correctly on GitHub and in forks.
+- It is not a full LaTeX compiler.
+- It does not guarantee perfect parsing for every paper source tree.
+- The chat panel is meant for lightweight reading assistance, not full retrieval over arbitrary long papers.
 
 ## Installation
 
-### Python environment
+Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-If you want to use the chat panel, set `GEMINI_API_KEY` in your environment.
+To use the chat panel, set `GEMINI_API_KEY` in your environment.
 
-### Run from source
+## Run from source
 
 GUI:
 
@@ -67,18 +65,18 @@ python cli.py --url https://arxiv.org/pdf/2601.11514
    - `Overwrite`
    - `Open Folder`
    - `Strip Comments`
-5. Use the right-side chat panel if you want a quick explanation or summary.
+5. Use the right-side chat panel for quick summaries or explanations.
 
-## Chat panel behavior
+## Chat panel
 
-The chat panel uses `gemini-3.1-flash-lite-preview`.
+The current chat panel uses `gemini-3.1-flash-lite-preview`.
 
 Current behavior:
 
-- it sends the current preview text as context
-- it keeps a short in-memory multi-turn history
-- `Reset` clears the current chat memory
-- it is best used after a paper has already been loaded into the preview
+- sends the current preview text as context
+- keeps short in-memory multi-turn history
+- clears chat memory when you click `Reset`
+- works best after a paper has already been loaded into the preview
 
 ## Output locations
 
@@ -89,8 +87,8 @@ If a cache directory becomes unreadable, ArXivCat may re-download the source or 
 
 ## Packaging
 
-For Windows packaging, the project currently uses `build.ps1` together with PyInstaller and the `arxivcat` conda environment.
+Windows packaging currently uses `build.ps1` together with PyInstaller and the `arxivcat` conda environment.
 
-## Notes for contributors
+## For maintainers
 
-If you are here to maintain or extend the project, read `tech_memo.md` first.
+If you plan to maintain or extend the project, read `tech_memo.md` first.

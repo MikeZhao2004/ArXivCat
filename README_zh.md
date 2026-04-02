@@ -2,42 +2,44 @@
 
 [English README](README.md)
 
-ArXivCat 是一个小型桌面工具，用来下载 arXiv 论文源码包，展开 LaTeX 里的 `\input` / `\include`，并导出相对干净的 `body.tex` 和 `appendix.tex`。
+ArXivCat 是一个处理 arXiv LaTeX 源码包的小型桌面工具。
+它会下载源码、展开 LaTeX 里的 `\input` / `\include`，并导出相对干净的 `body.tex` 和 `appendix.tex`。
 
-它面向一个很实际的工作流：粘贴 arXiv 链接或编号，查看提取结果，做一点轻量编辑，并且在需要时用右侧 Gemini chat 对当前加载的论文内容做简单问答。
+这个项目面向一个很直接的工作流：粘贴 arXiv 链接或 ID，查看提取后的文本，做一点轻量编辑，并在需要时使用右侧内置的 Gemini chat，对当前论文内容做快速问答。
 
 ![ArXivCat 截图](assets/screenshot.png)
 
-## 这个项目能做什么
+## 功能
 
 - 支持从 arXiv 页面链接、PDF 链接或纯 arXiv ID 下载源码包
-- 自动解压并缓存源码
+- 自动解压并缓存 arXiv 源码
 - 递归展开 LaTeX `\input` 和 `\include`
-- 自动寻找主 TeX 文件，并导出：
+- 自动寻找主 TeX 文件
+- 导出：
   - `body.tex`
   - 如果存在则导出 `appendix.tex`
 - 提供 Tkinter GUI，用于预览和轻量编辑提取结果
-- 右侧带一个极简 Gemini chat，并支持 reset 清空短期记忆
+- 右侧带一个轻量 Gemini chat 面板
 
-## 这个项目不打算做什么
+## 项目边界
 
 ArXivCat 的目标比较收敛。
 
-- 它不是一个完整的 LaTeX 编译器。
+- 它不是完整的 LaTeX 编译器。
 - 它不保证对所有论文源码结构都能完美解析。
-- 右侧 chat 更偏轻量阅读辅助，不是完整的检索增强问答系统。
+- 右侧 chat 主要用于轻量阅读辅助，不是针对超长论文的完整检索系统。
 
 ## 安装
 
-### Python 依赖
+安装依赖：
 
 ```bash
 pip install -r requirements.txt
 ```
 
-如果要使用右侧 chat，需要在环境变量里设置 `GEMINI_API_KEY`。
+如果要使用 chat，需要在环境变量里设置 `GEMINI_API_KEY`。
 
-### 从源码运行
+## 从源码运行
 
 GUI：
 
@@ -63,17 +65,17 @@ python cli.py --url https://arxiv.org/pdf/2601.11514
    - `Overwrite`
    - `Open Folder`
    - `Strip Comments`
-5. 如果需要，可以用右侧 chat 对当前内容做简单解释或总结
+5. 用右侧 chat 做快速总结或解释
 
-## Chat 面板说明
+## Chat 面板
 
 当前 chat 使用 `gemini-3.1-flash-lite-preview`。
 
 目前的行为：
 
 - 会把当前预览区文本作为上下文发送
-- 会保留一个短期的内存对话历史
-- 点击 `Reset` 会清空当前 chat 记忆
+- 会保留一个短期的多轮内存历史
+- 点击 `Reset` 会清空 chat 记忆
 - 最适合在左侧已经加载论文内容之后使用
 
 ## 输出目录
@@ -81,12 +83,12 @@ python cli.py --url https://arxiv.org/pdf/2601.11514
 - 缓存：`%APPDATA%/ArxivCat/downloads/`
 - 结果：`%APPDATA%/ArxivCat/outputs/`
 
-如果缓存目录损坏或不可读，ArXivCat 会自动重下，或者写到 `*_freshN` 目录。
+如果缓存目录不可读，ArXivCat 可能会自动重下，或者写到 `*_freshN` 目录。
 
 ## 打包
 
 Windows 打包目前使用 `build.ps1`，底层是 PyInstaller，默认依赖 `arxivcat` 这个 conda 环境。
 
-## 给后续维护者
+## 给维护者
 
-如果你是来继续维护这个项目的，建议先读 `tech_memo.md`。
+如果你准备继续维护或扩展这个项目，建议先读 `tech_memo.md`。
